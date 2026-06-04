@@ -18,6 +18,220 @@ library(tidyr)
 library(DT)
 
 # -----------------------------
+# Helper functions
+# -----------------------------
+
+parse_list_input <- function(x) {
+  x <- gsub("[;\n\r]+", ",", x)
+  out <- trimws(unlist(strsplit(x, ",")))
+  out <- out[nzchar(out)]
+  unique(out)
+}
+
+make_days <- function(n_weeks, days_per_week) {
+  paste0("Day ", seq_len(n_weeks * days_per_week))
+}
+
+make_rotation_dates <- function(start_date, n_days) {
+  # Returns the first n_days weekdays beginning on/after start_date.
+  # Weekends are skipped.
+  start_date <- as.Date(start_date)
+
+  candidate_dates <- seq.Date(
+    from = start_date,
+    by = "day",
+    length.out = n_days + ceiling(n_days / 5) * 4 + 14
+  )
+
+  weekday_dates <- candidate_dates[weekdays(candidate_dates) %in% c(
+    "Monday", "Tuesday", "Wednesday", "Thursday", "Friday"
+  )]
+
+  weekday_dates[seq_len(n_days)]
+}
+
+format_schedule_date <- function(x) {
+  x <- as.Date(x)
+  paste0(
+    weekdays(x), ", ",
+    format(x, "%B"), " ",
+    as.integer(format(x, "%d"))
+  )
+}
+
+normalize_locations <- function(locations, services) {
+  # locations should look like:
+  # service,Monday,Tuesday,Wednesday,Thursday,Friday
+  # GI,Main Campus,Main Campus,East Campus,East Campus,Main Campus
+  #
+  # If there is no column named service, the first column is treated as service.
+
+  if (is.null(locations)) {
+    locations <- data.frame(service = services, stringsAsFactors = FALSE)
+  }
+
+  locations <- as.data.frame(locations, stringsAsFactors = FALSE)
+
+  if (!"service" %in% names(locations)) {
+    names(locations)[1] <- "service"
+  }
+
+  required_days <- c("Monday", "Tuesday", "Wednesday", "Thursday", "Friday")
+
+  for (day_name in required_days) {
+    if (!day_name %in% names(locations)) {
+      locations[[day_name]] <- NA_character_
+    }
+  }
+
+  locations %>%
+    mutate(service = as.character(service)) %>%
+    select(service, all_of(required_days)) %>%
+    pivot_longer(
+      cols = all_of(required_days),
+      names_to = "weekday",
+      values_to = "location"
+    ) %>%
+    mutate(
+      location = trimws(as.character(location)),
+      location = ifelse(is.na(location) | location == "", NA_character_, location)
+    )
+}
+
+is_academic_location <- function(x) {
+  !is.na(x) & tolower(trimws(as.character(x))) == "academic"
+}
+
+make_academic_location_matrix <- function(days, services, start_date = NULL, locations = NULL) {
+  # Returns a day x service matrix where 1 means the service-day location is "academic".
+  # These assignments are allowed, but heavily penalized in the optimizer.
+
+  n_days <- length(days)
+  n_services <- length(services)
+
+  academic_location <- matrix(0, nrow = n_days, ncol = n_services)
+
+  if (is.null(start_date) || is.null(locations)) {
+    return(academic_location)
+  }
+
+  rotation_dates <- make_rotation_dates(start_date = start_date, n_days = n_days)
+
+  day_lookup <- tibble(
+    day_id = seq_along(days),
+    weekday = weekdays(rotation_dates)
+  )
+
+  location_long <- normalize_locations(locations = locations, services = services)
+
+  academic_df <- expand.grid(
+    day_id = seq_along(days),
+    service_id = seq_along(services),
+    stringsAsFactors = FALSE
+  ) %>%
+    mutate(
+      service = services[service_id]
+    ) %>%
+    left_join(day_lookup, by = "day_id") %>%
+    left_join(location_long, by = c("service", "weekday")) %>%
+    mutate(is_academic = is_academic_location(location))
+
+  academic_location[cbind(academic_df$day_id, academic_df$service_id)] <- as.integer(academic_df$is_academic)
+
+  academic_location
+}
+
+add_schedule_metadata <- function(assignments, days, start_date = NULL, locations = NULL, days_per_week = 5) {
+  n_days <- length(days)
+
+  if (is.null(start_date)) {
+    day_lookup <- tibble(
+      day = days,
+      day_num = seq_along(days),
+      week = ceiling(seq_along(days) / days_per_week),
+      date = as.Date(NA),
+      weekday = NA_character_,
+      date_label = days
+    )
+  } else {
+    rotation_dates <- make_rotation_dates(start_date = start_date, n_days = n_days)
+
+    day_lookup <- tibble(
+      day = days,
+      day_num = seq_along(days),
+      week = ceiling(seq_along(days) / days_per_week),
+      date = rotation_dates,
+      weekday = weekdays(rotation_dates),
+      date_label = format_schedule_date(rotation_dates)
+    )
+  }
+
+  out <- assignments %>%
+    left_join(day_lookup, by = "day")
+
+  if (!is.null(locations)) {
+    location_long <- normalize_locations(locations = locations, services = unique(assignments$service))
+
+    out <- out %>%
+      left_join(location_long, by = c("service", "weekday"))
+  } else {
+    out <- out %>%
+      mutate(location = NA_character_)
+  }
+
+  out %>%
+    mutate(
+      is_academic_location = is_academic_location(location),
+      assignment = ifelse(
+        is.na(location) | location == "",
+        service,
+        paste0(service, " - ", location)
+      )
+    )
+}
+
+make_availability <- function(days, services, n_weeks, days_per_week, input) {
+  availability <- expand.grid(
+    day = days,
+    service = services,
+    stringsAsFactors = FALSE
+  ) %>%
+    mutate(
+      day_num = as.integer(gsub("[^0-9]", "", day)),
+      week = ceiling(day_num / days_per_week)
+    )
+
+  availability$available <- FALSE
+
+  for (w in seq_len(n_weeks)) {
+    selected <- input[[paste0("week_services_", w)]]
+
+    if (is.null(selected)) {
+      selected <- character(0)
+    }
+
+    availability$available[availability$week == w & availability$service %in% selected] <- TRUE
+  }
+
+  availability %>%
+    select(day, service, available)
+}
+
+read_locations_file <- function(file_info, default_path = "locations.csv") {
+  # Use an uploaded locations.csv if provided. Otherwise, fall back to a
+  # bundled locations.csv stored in the same directory as app.R.
+  if (!is.null(file_info)) {
+    return(read.csv(file_info$datapath, stringsAsFactors = FALSE, check.names = FALSE))
+  }
+
+  if (file.exists(default_path)) {
+    return(read.csv(default_path, stringsAsFactors = FALSE, check.names = FALSE))
+  }
+
+  NULL
+}
+
+# -----------------------------
 # Scheduler function
 # -----------------------------
 
@@ -26,10 +240,14 @@ schedule_rotation <- function(
     services,
     days,
     availability,
+    start_date = NULL,
+    locations = NULL,
+    days_per_week = 5,
     require_all_available = TRUE,
     min_exposures_per_student = 1,
     back_to_back_penalty = 100,
-    imbalance_penalty = 1
+    imbalance_penalty = 1,
+    academic_location_penalty = 10000
 ) {
   n_students <- length(students)
   n_services <- length(services)
@@ -57,6 +275,13 @@ schedule_rotation <- function(
     nrow = n_days,
     ncol = n_services,
     byrow = TRUE
+  )
+
+  academic_location <- make_academic_location_matrix(
+    days = days,
+    services = services,
+    start_date = start_date,
+    locations = locations
   )
 
   available_per_day <- rowSums(available)
@@ -166,7 +391,9 @@ schedule_rotation <- function(
       back_to_back_penalty *
         sum_expr(y[s, d, v], s = student_ids, d = day_ids[-1], v = service_ids) +
         imbalance_penalty *
-        sum_expr(excess[s, v], s = student_ids, v = service_ids),
+        sum_expr(excess[s, v], s = student_ids, v = service_ids) +
+        academic_location_penalty *
+        sum_expr(academic_location[d, v] * x[s, d, v], s = student_ids, d = day_ids, v = service_ids),
       sense = "min"
     )
 
@@ -187,61 +414,31 @@ schedule_rotation <- function(
     arrange(d, s) %>%
     select(day, student, service)
 
-  wide_schedule <- assignments %>%
-    mutate(day = factor(day, levels = days, ordered = TRUE)) %>%
+  long_schedule <- add_schedule_metadata(
+    assignments = assignments,
+    days = days,
+    start_date = start_date,
+    locations = locations,
+    days_per_week = days_per_week
+  ) %>%
+    arrange(day_num, student) %>%
+    select(week, date_label, date, weekday, day_num, day, student, service, location, is_academic_location, assignment)
+
+  wide_schedule <- long_schedule %>%
+    mutate(date_label = factor(date_label, levels = unique(date_label), ordered = TRUE)) %>%
+    select(week, date_label, student, assignment) %>%
     pivot_wider(
       names_from = student,
-      values_from = service
+      values_from = assignment
     ) %>%
-    arrange(day) %>%
-    mutate(day = as.character(day))
+    arrange(date_label) %>%
+    mutate(date_label = as.character(date_label)) %>%
+    rename(date = date_label)
 
   list(
-    long = assignments,
+    long = long_schedule,
     wide = wide_schedule
   )
-}
-
-# -----------------------------
-# Helper functions
-# -----------------------------
-
-parse_list_input <- function(x) {
-  x <- gsub("[;\n\r]+", ",", x)
-  out <- trimws(unlist(strsplit(x, ",")))
-  out <- out[nzchar(out)]
-  unique(out)
-}
-
-make_days <- function(n_weeks, days_per_week) {
-  paste0("Day ", seq_len(n_weeks * days_per_week))
-}
-
-make_availability <- function(days, services, n_weeks, days_per_week, input) {
-  availability <- expand.grid(
-    day = days,
-    service = services,
-    stringsAsFactors = FALSE
-  ) %>%
-    mutate(
-      day_num = as.integer(gsub("[^0-9]", "", day)),
-      week = ceiling(day_num / days_per_week)
-    )
-
-  availability$available <- FALSE
-
-  for (w in seq_len(n_weeks)) {
-    selected <- input[[paste0("week_services_", w)]]
-
-    if (is.null(selected)) {
-      selected <- character(0)
-    }
-
-    availability$available[availability$week == w & availability$service %in% selected] <- TRUE
-  }
-
-  availability %>%
-    select(day, service, available)
 }
 
 # -----------------------------
@@ -271,7 +468,13 @@ ui <- fluidPage(
         rows = 4
       ),
 
-      h4("Rotation length"),
+      h4("Rotation dates"),
+      dateInput(
+        inputId = "start_date",
+        label = "Start date",
+        value = Sys.Date(),
+        weekstart = 1
+      ),
       selectInput(
         inputId = "n_weeks",
         label = "Number of weeks",
@@ -283,7 +486,7 @@ ui <- fluidPage(
         label = "Rotation days per week",
         value = 5,
         min = 1,
-        max = 7,
+        max = 5,
         step = 1
       ),
 
@@ -301,6 +504,14 @@ ui <- fluidPage(
         placeholder = "Example:\nBrachytherapy\nLymphoma",
         rows = 3
       ),
+
+      h4("Locations"),
+      fileInput(
+        inputId = "locations_file",
+        label = "Optional locations.csv override",
+        accept = c(".csv")
+      ),
+      helpText("By default, the app uses locations.csv bundled in the same folder as app.R. Uploading a file here temporarily overrides that bundled file. Expected columns: service, Monday, Tuesday, Wednesday, Thursday, Friday. If a location value is 'academic', that service-day is avoided unless needed to make the schedule work."),
 
       h4("Schedule rules"),
       checkboxInput(
@@ -330,11 +541,19 @@ ui <- fluidPage(
         min = 0,
         step = 1
       ),
+      numericInput(
+        inputId = "academic_location_penalty",
+        label = "Academic-location penalty",
+        value = 10000,
+        min = 0,
+        step = 100
+      ),
 
       actionButton("run_schedule", "Create schedule", class = "btn-primary"),
       br(), br(),
       downloadButton("download_wide", "Download wide CSV"),
-      downloadButton("download_long", "Download long CSV")
+      downloadButton("download_long", "Download long CSV"),
+      downloadButton("download_locations_template", "Download locations template")
     ),
 
     mainPanel(
@@ -398,11 +617,13 @@ server <- function(input, output, session) {
     n_weeks <- as.integer(input$n_weeks)
     days_per_week <- as.integer(input$days_per_week)
     days <- make_days(n_weeks, days_per_week)
+    locations <- read_locations_file(input$locations_file)
 
     validate(
       need(length(students) >= 1, "Enter at least one student."),
       need(length(services) >= 1, "Select or add at least one service."),
-      need(days_per_week >= 1, "Days per week must be at least 1.")
+      need(days_per_week >= 1, "Days per week must be at least 1."),
+      need(days_per_week <= 5, "Locations are currently set up for Monday-Friday only.")
     )
 
     availability <- make_availability(
@@ -420,10 +641,14 @@ server <- function(input, output, session) {
           services = services,
           days = days,
           availability = availability,
+          start_date = input$start_date,
+          locations = locations,
+          days_per_week = days_per_week,
           require_all_available = isTRUE(input$require_all_available),
           min_exposures_per_student = input$min_exposures,
           back_to_back_penalty = input$back_to_back_penalty,
-          imbalance_penalty = input$imbalance_penalty
+          imbalance_penalty = input$imbalance_penalty,
+          academic_location_penalty = input$academic_location_penalty
         )
 
         counts <- sched$long %>%
@@ -431,13 +656,12 @@ server <- function(input, output, session) {
           arrange(student, service)
 
         repeats <- sched$long %>%
-          mutate(day_num = as.integer(gsub("[^0-9]", "", day))) %>%
           arrange(student, day_num) %>%
           group_by(student) %>%
           mutate(previous_service = lag(service)) %>%
           ungroup() %>%
           filter(service == previous_service) %>%
-          select(day, student, service)
+          select(date_label, student, service, location)
 
         list(
           ok = TRUE,
@@ -496,9 +720,10 @@ server <- function(input, output, session) {
 
     if (nrow(repeats) == 0) {
       repeats <- tibble(
-        day = character(0),
+        date_label = character(0),
         student = character(0),
-        service = character(0)
+        service = character(0),
+        location = character(0)
       )
     }
 
@@ -528,6 +753,25 @@ server <- function(input, output, session) {
       res <- result()
       req(res$ok)
       write.csv(res$sched$long, file, row.names = FALSE)
+    }
+  )
+
+  output$download_locations_template <- downloadHandler(
+    filename = function() {
+      "locations_template.csv"
+    },
+    content = function(file) {
+      services <- selected_services()
+      template <- data.frame(
+        service = services,
+        Monday = "",
+        Tuesday = "",
+        Wednesday = "",
+        Thursday = "",
+        Friday = "",
+        check.names = FALSE
+      )
+      write.csv(template, file, row.names = FALSE, na = "")
     }
   )
 }

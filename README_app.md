@@ -17,6 +17,9 @@ The scheduler creates a rotation schedule that aims to:
 - use only services that are marked as available
 - ensure each student sees each available service at least once, when feasible
 - avoid assigning the same student to the same service on back-to-back days when possible
+- display the schedule using real dates, such as `Monday, January 1`
+- append campus/location information to each service assignment
+- avoid service-days marked as `academic` unless needed to make the schedule feasible
 
 ## Step-by-Step Use
 
@@ -34,7 +37,11 @@ Student B
 Student C
 ```
 
-### 2. Choose Rotation Length
+### 2. Choose Rotation Dates and Length
+
+Choose the rotation start date.
+
+The app uses weekdays only. If the selected start date falls on a weekend, the schedule begins on the next weekday.
 
 Select whether the rotation is:
 
@@ -72,13 +79,37 @@ Lymphoma
 
 These added services will appear as options for the current scheduling run.
 
-### 5. Set Weekly Service Availability
+### 5. Review Locations
+
+The hosted app includes a bundled `locations.csv` file. In normal use, users do not need to upload a locations file. If you upload a file using the optional `locations.csv` upload box, the uploaded file overrides the bundled file for that session only.
+
+The expected format is:
+
+```csv
+service,Monday,Tuesday,Wednesday,Thursday,Friday
+GU,Main Campus,Main Campus,East Campus,East Campus,Main Campus
+Breast,Main Campus,Main Campus,Main Campus,Main Campus,Main Campus
+GI,Main Campus,East Campus,East Campus,Main Campus,Main Campus
+H&N,West Campus,West Campus,Main Campus,Main Campus,Main Campus
+CNS/Peds,Academic,Main Campus,Main Campus,Main Campus,Academic
+Gyn/Peds/Lymph,Main Campus,Main Campus,Academic,Main Campus,Main Campus
+Thoracic/Sarc/Lymph,East Campus,East Campus,Main Campus,Main Campus,Main Campus
+```
+
+The final schedule displays assignments like:
+
+```text
+GI - Main Campus
+GU - East Campus
+```
+
+### 6. Set Weekly Service Availability
 
 For each week, select which services are available during that week.
 
 The scheduler will only assign students to services that are checked as available for that week.
 
-### 6. Review Schedule Rules
+### 7. Review Schedule Rules
 
 The default settings require each student to see each available service at least once, when feasible.
 
@@ -86,10 +117,11 @@ The app also includes penalty settings for:
 
 - back-to-back repeats
 - service imbalance
+- academic-location assignments
 
 Most users should leave these settings at their defaults.
 
-### 7. Create the Schedule
+### 8. Create the Schedule
 
 Click **Create schedule**.
 
@@ -97,13 +129,37 @@ If a valid schedule is found, the schedule table will appear.
 
 If a valid schedule cannot be created, the app will show an error message explaining the issue. Common causes include too few available services on a given day or a service not being available enough times for every student to rotate through it.
 
+## Academic Locations
+
+If a location value is `Academic`, that service-day is avoided unless needed to make the schedule feasible.
+
+For example:
+
+```csv
+service,Monday,Tuesday,Wednesday,Thursday,Friday
+CNS/Peds,Academic,Main Campus,Main Campus,Main Campus,Academic
+```
+
+This means `CNS/Peds` on Monday and Friday is allowed only as a backup option. The optimizer will prefer other valid assignments when possible.
+
+The strength of this avoidance is controlled by the academic-location penalty. A higher value makes academic-location assignments less likely.
+
 ## Outputs
 
 The app provides three main outputs:
 
 ### Schedule
 
-This is the main schedule table, with one row per day and one column per student.
+This is the main schedule table, with one row per date and one column per student.
+
+Each assignment includes the service and, when available, the location.
+
+Example:
+
+```text
+GI - Main Campus
+Breast - East Campus
+```
 
 ### Exposure Counts
 
@@ -123,15 +179,14 @@ The app provides two CSV download options.
 
 The **wide** download is probably what most users want.
 
-It gives a readable schedule with one row per day and one column per student.
+It gives a readable schedule with one row per date and one column per student.
 
 Example format:
 
 ```text
-day,Student A,Student B,Student C
-Day 1,GU,Breast,GI
-Day 2,GI,H&N,GU
-Day 3,Breast,GI,H&N
+week,date,Student A,Student B,Student C
+1,"Monday, January 1",GU - Main Campus,Breast - Main Campus,GI - East Campus
+1,"Tuesday, January 2",GI - Main Campus,H&N - West Campus,GU - Main Campus
 ```
 
 This format is easiest to read, print, or share.
@@ -145,13 +200,11 @@ It gives one row per student-day assignment.
 Example format:
 
 ```text
-day,student,service
-Day 1,Student A,GU
-Day 1,Student B,Breast
-Day 1,Student C,GI
+week,date_label,date,weekday,day_num,day,student,service,location,is_academic_location,assignment
+1,"Monday, January 1",2026-01-01,Monday,1,Day 1,Student A,GU,Main Campus,FALSE,GU - Main Campus
 ```
 
-This format is useful for data analysis, checking counts, or reshaping the schedule later.
+This format is useful for data analysis, checking counts, identifying academic-location assignments, or reshaping the schedule later.
 
 ## Feasibility Notes
 
@@ -168,3 +221,4 @@ When no feasible schedule exists, try one of the following:
 - allow fewer services to be required
 - extend the rotation length
 - reduce the number of students assigned to the block
+- reduce the academic-location penalty if academic assignments are acceptable as a fallback
