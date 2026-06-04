@@ -1,6 +1,6 @@
 # Student Rotation Scheduler
 
-This R script creates daily student rotation schedules across multiple clinical services while enforcing basic scheduling rules.
+This R script creates daily student rotation schedules across multiple clinical services while enforcing basic scheduling rules. There is also an app [accessible here](https://s-carson-callahan.shinyapps.io/Schedule-Maker/). Please see the `README_app.md` in this repo for more help with the app.
 
 ## Purpose
 
