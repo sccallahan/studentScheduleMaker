@@ -6,7 +6,7 @@ The app is intended for short student rotations, most commonly 2-week rotations,
 
 ## Accessing the App
 
-You can [access the app here.](https://s-carson-callahan.shinyapps.io/Schedule-Maker/)
+You can [access the app here.](https://s-carson-callahan.shinyapps.io/studentScheduleMaker/)
 
 ## What the App Does
 
