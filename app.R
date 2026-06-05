@@ -246,8 +246,7 @@ schedule_rotation <- function(
     require_all_available = TRUE,
     min_exposures_per_student = 1,
     back_to_back_penalty = 100,
-    imbalance_penalty = 1,
-    academic_location_penalty = 10000
+    imbalance_penalty = 1
 ) {
   n_students <- length(students)
   n_services <- length(services)
@@ -284,15 +283,28 @@ schedule_rotation <- function(
     locations = locations
   )
 
+  # Treat service-days with location == "Academic" as truly unavailable.
+  # These assignments are forbidden, not merely penalized.
+  available[academic_location == 1] <- 0
+
   available_per_day <- rowSums(available)
 
-  if (any(available_per_day < n_students)) {
-    bad_days <- days[which(available_per_day < n_students)]
+  # If there are fewer available services than students on a given day,
+  # allow multiple students to share available services on that day.
+  # When there are enough services, preserve the usual one-student-per-service rule.
+  if (any(available_per_day == 0)) {
+    bad_days <- days[which(available_per_day == 0)]
     stop(
-      "Infeasible: fewer available services than students on these days: ",
+      "Infeasible: no available services on these days after applying availability and academic-location exclusions: ",
       paste(bad_days, collapse = ", ")
     )
   }
+
+  service_capacity_by_day <- ifelse(
+    available_per_day < n_students,
+    ceiling(n_students / available_per_day),
+    1
+  )
 
   services_available_at_least_once <- service_ids[colSums(available) > 0]
 
@@ -311,17 +323,27 @@ schedule_rotation <- function(
     )
   }
 
-  service_available_days <- colSums(available)
+  # Maximum number of student-slots each service can support over the rotation.
+  # This accounts for days where multiple students are allowed on a service because
+  # the number of students exceeds the number of available services.
+  service_available_slots <- colSums(
+    available * matrix(
+      service_capacity_by_day,
+      nrow = n_days,
+      ncol = n_services,
+      byrow = FALSE
+    )
+  )
 
   if (require_all_available) {
     too_rare <- services_available_at_least_once[
-      service_available_days[services_available_at_least_once] <
+      service_available_slots[services_available_at_least_once] <
         n_students * min_exposures_per_student
     ]
 
     if (length(too_rare) > 0) {
       stop(
-        "Infeasible: these services are not available on enough days for every student to see them ",
+        "Infeasible: these services do not have enough available student-slots for every student to see them ",
         min_exposures_per_student,
         " time(s): ",
         paste(services[too_rare], collapse = ", ")
@@ -345,9 +367,11 @@ schedule_rotation <- function(
       d = day_ids
     ) %>%
 
-    # Each service gets at most one student per day
+    # Each service usually gets at most one student per day.
+    # If a day has fewer available services than students, allow multiple students
+    # on available services for that day, up to service_capacity_by_day[d].
     add_constraint(
-      sum_expr(x[s, d, v], s = student_ids) <= 1,
+      sum_expr(x[s, d, v], s = student_ids) <= service_capacity_by_day[d],
       d = day_ids,
       v = service_ids
     ) %>%
@@ -391,9 +415,7 @@ schedule_rotation <- function(
       back_to_back_penalty *
         sum_expr(y[s, d, v], s = student_ids, d = day_ids[-1], v = service_ids) +
         imbalance_penalty *
-        sum_expr(excess[s, v], s = student_ids, v = service_ids) +
-        academic_location_penalty *
-        sum_expr(academic_location[d, v] * x[s, d, v], s = student_ids, d = day_ids, v = service_ids),
+        sum_expr(excess[s, v], s = student_ids, v = service_ids),
       sense = "min"
     )
 
@@ -511,7 +533,7 @@ ui <- fluidPage(
         label = "Optional locations.csv override",
         accept = c(".csv")
       ),
-      helpText("By default, the app uses locations.csv bundled in the same folder as app.R. Uploading a file here temporarily overrides that bundled file. Expected columns: service, Monday, Tuesday, Wednesday, Thursday, Friday. If a location value is 'academic', that service-day is avoided unless needed to make the schedule work."),
+      helpText("By default, the app uses locations.csv bundled in the same folder as app.R. Uploading a file here temporarily overrides that bundled file. Expected columns: service, Monday, Tuesday, Wednesday, Thursday, Friday. If a location value is 'academic', that service-day is treated as unavailable and will not be assigned."),
 
       h4("Schedule rules"),
       checkboxInput(
@@ -541,14 +563,6 @@ ui <- fluidPage(
         min = 0,
         step = 1
       ),
-      numericInput(
-        inputId = "academic_location_penalty",
-        label = "Academic-location penalty",
-        value = 10000,
-        min = 0,
-        step = 100
-      ),
-
       actionButton("run_schedule", "Create schedule", class = "btn-primary"),
       br(), br(),
       downloadButton("download_wide", "Download wide CSV"),
@@ -647,8 +661,7 @@ server <- function(input, output, session) {
           require_all_available = isTRUE(input$require_all_available),
           min_exposures_per_student = input$min_exposures,
           back_to_back_penalty = input$back_to_back_penalty,
-          imbalance_penalty = input$imbalance_penalty,
-          academic_location_penalty = input$academic_location_penalty
+          imbalance_penalty = input$imbalance_penalty
         )
 
         counts <- sched$long %>%
@@ -665,7 +678,7 @@ server <- function(input, output, session) {
 
         list(
           ok = TRUE,
-          message = "Schedule created successfully.",
+          message = "Schedule created successfully. Academic-location service-days were treated as unavailable.",
           sched = sched,
           counts = counts,
           repeats = repeats

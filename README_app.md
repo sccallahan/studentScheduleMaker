@@ -13,13 +13,14 @@ You can [access the app here.](https://s-carson-callahan.shinyapps.io/studentSch
 The scheduler creates a rotation schedule that aims to:
 
 - assign each student to exactly one service per day
-- prevent more than one student from being assigned to the same service on the same day
+- prevent more than one student from being assigned to the same service on the same day when enough services are available
+- allow multiple students on the same available service if there are fewer available services than students on a given day
 - use only services that are marked as available
+- treat service-days marked as `Academic` as unavailable
 - ensure each student sees each available service at least once, when feasible
 - avoid assigning the same student to the same service on back-to-back days when possible
 - display the schedule using real dates, such as `Monday, January 1`
 - append campus/location information to each service assignment
-- avoid service-days marked as `academic` unless needed to make the schedule feasible
 
 ## Step-by-Step Use
 
@@ -81,7 +82,17 @@ These added services will appear as options for the current scheduling run.
 
 ### 5. Review Locations
 
-The hosted app includes a bundled `locations.csv` file. In normal use, users do not need to upload a locations file. If you upload a file using the optional `locations.csv` upload box, the uploaded file overrides the bundled file for that session only.
+The hosted app can include a bundled `locations.csv` file. In normal use, users do not need to upload a locations file.
+
+The app first looks for a bundled file called:
+
+```text
+locations.csv
+```
+
+in the same folder as `app.R`.
+
+If you upload a file using the optional `locations.csv` upload box, the uploaded file overrides the bundled file for that session only.
 
 The expected format is:
 
@@ -107,7 +118,7 @@ GU - East Campus
 
 For each week, select which services are available during that week.
 
-The scheduler will only assign students to services that are checked as available for that week.
+The scheduler will only assign students to services that are checked as available for that week and not marked as `Academic` for that weekday.
 
 ### 7. Review Schedule Rules
 
@@ -117,7 +128,6 @@ The app also includes penalty settings for:
 
 - back-to-back repeats
 - service imbalance
-- academic-location assignments
 
 Most users should leave these settings at their defaults.
 
@@ -127,11 +137,11 @@ Click **Create schedule**.
 
 If a valid schedule is found, the schedule table will appear.
 
-If a valid schedule cannot be created, the app will show an error message explaining the issue. Common causes include too few available services on a given day or a service not being available enough times for every student to rotate through it.
+If a valid schedule cannot be created, the app will show an error message explaining the issue. Common causes include a required service not being available enough times after excluding `Academic` days.
 
 ## Academic Locations
 
-If a location value is `Academic`, that service-day is avoided unless needed to make the schedule feasible.
+If a location value is `Academic`, that service-day is treated as unavailable.
 
 For example:
 
@@ -140,9 +150,15 @@ service,Monday,Tuesday,Wednesday,Thursday,Friday
 CNS/Peds,Academic,Main Campus,Main Campus,Main Campus,Academic
 ```
 
-This means `CNS/Peds` on Monday and Friday is allowed only as a backup option. The optimizer will prefer other valid assignments when possible.
+This means `CNS/Peds` will not be scheduled on Mondays or Fridays. There is no fallback behavior for `Academic` days; they are fully excluded.
 
-The strength of this avoidance is controlled by the academic-location penalty. A higher value makes academic-location assignments less likely.
+## Multiple Students on One Service
+
+The app normally prevents more than one student from being assigned to the same service on the same day.
+
+However, if a day has fewer available services than students, the app allows multiple students to share an available service on that day. This prevents schedules from failing simply because, for example, there are 4 students but only 3 available services on a particular day.
+
+This fallback only applies when the number of available services on a day is less than the number of students.
 
 ## Outputs
 
@@ -204,15 +220,31 @@ week,date_label,date,weekday,day_num,day,student,service,location,is_academic_lo
 1,"Monday, January 1",2026-01-01,Monday,1,Day 1,Student A,GU,Main Campus,FALSE,GU - Main Campus
 ```
 
-This format is useful for data analysis, checking counts, identifying academic-location assignments, or reshaping the schedule later.
+This format is useful for data analysis, checking counts, identifying shared service-days, or reshaping the schedule later.
+
+## Hosting Notes
+
+To use a built-in locations file when hosting the app, include `locations.csv` in the same directory as `app.R`.
+
+Example app folder:
+
+```text
+studentScheduleMaker/
+├── app.R
+└── locations.csv
+```
+
+When deployed, the app will automatically read the bundled `locations.csv`.
+
+The optional upload field remains available as an override for testing or one-off changes.
 
 ## Feasibility Notes
 
 Some combinations of students, services, and availability are mathematically impossible.
 
-For example, if there are 3 students and every student must rotate through GU at least once, then GU must be available on at least 3 separate days because only one student can be assigned to GU per day.
+The app now permits multiple students to share a service when there are fewer available services than students on a given day. Therefore, a day with fewer services than students is no longer automatically infeasible.
 
-Similarly, if there are 3 students, then at least 3 services must be available on every rotation day.
+However, the schedule can still be infeasible if a required service is not available enough times after excluding unavailable and `Academic` service-days.
 
 When no feasible schedule exists, try one of the following:
 
@@ -221,4 +253,3 @@ When no feasible schedule exists, try one of the following:
 - allow fewer services to be required
 - extend the rotation length
 - reduce the number of students assigned to the block
-- reduce the academic-location penalty if academic assignments are acceptable as a fallback

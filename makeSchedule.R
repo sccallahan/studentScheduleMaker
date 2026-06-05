@@ -1,5 +1,13 @@
-# makeSchedule_updated.R
-# install.packages(c("ompr", "ompr.roi", "ROI.plugin.glpk", "dplyr", "tidyr"))
+# app.R
+# Student Rotation Scheduler Shiny App
+#
+# Run with:
+# install.packages(c(
+#   "shiny", "ompr", "ompr.roi", "ROI.plugin.glpk",
+#   "dplyr", "tidyr", "DT"
+# ))
+#
+# shiny::runApp("app.R")
 
 library(ompr)
 library(ompr.roi)
@@ -10,6 +18,17 @@ library(tidyr)
 # -----------------------------
 # Helper functions
 # -----------------------------
+
+parse_list_input <- function(x) {
+  x <- gsub("[;\n\r]+", ",", x)
+  out <- trimws(unlist(strsplit(x, ",")))
+  out <- out[nzchar(out)]
+  unique(out)
+}
+
+make_days <- function(n_weeks, days_per_week) {
+  paste0("Day ", seq_len(n_weeks * days_per_week))
+}
 
 make_rotation_dates <- function(start_date, n_days) {
   # Returns the first n_days weekdays beginning on/after start_date.
@@ -169,6 +188,47 @@ add_schedule_metadata <- function(assignments, days, start_date = NULL, location
     )
 }
 
+make_availability <- function(days, services, n_weeks, days_per_week, input) {
+  availability <- expand.grid(
+    day = days,
+    service = services,
+    stringsAsFactors = FALSE
+  ) %>%
+    mutate(
+      day_num = as.integer(gsub("[^0-9]", "", day)),
+      week = ceiling(day_num / days_per_week)
+    )
+
+  availability$available <- FALSE
+
+  for (w in seq_len(n_weeks)) {
+    selected <- input[[paste0("week_services_", w)]]
+
+    if (is.null(selected)) {
+      selected <- character(0)
+    }
+
+    availability$available[availability$week == w & availability$service %in% selected] <- TRUE
+  }
+
+  availability %>%
+    select(day, service, available)
+}
+
+read_locations_file <- function(file_info, default_path = "locations.csv") {
+  # Use an uploaded locations.csv if provided. Otherwise, fall back to a
+  # bundled locations.csv stored in the same directory as app.R.
+  if (!is.null(file_info)) {
+    return(read.csv(file_info$datapath, stringsAsFactors = FALSE, check.names = FALSE))
+  }
+
+  if (file.exists(default_path)) {
+    return(read.csv(default_path, stringsAsFactors = FALSE, check.names = FALSE))
+  }
+
+  NULL
+}
+
 # -----------------------------
 # Scheduler function
 # -----------------------------
@@ -184,8 +244,7 @@ schedule_rotation <- function(
     require_all_available = TRUE,
     min_exposures_per_student = 1,
     back_to_back_penalty = 100,
-    imbalance_penalty = 1,
-    academic_location_penalty = 10000
+    imbalance_penalty = 1
 ) {
   n_students <- length(students)
   n_services <- length(services)
@@ -222,15 +281,28 @@ schedule_rotation <- function(
     locations = locations
   )
 
+  # Treat service-days with location == "Academic" as truly unavailable.
+  # These assignments are forbidden, not merely penalized.
+  available[academic_location == 1] <- 0
+
   available_per_day <- rowSums(available)
 
-  if (any(available_per_day < n_students)) {
-    bad_days <- days[which(available_per_day < n_students)]
+  # If there are fewer available services than students on a given day,
+  # allow multiple students to share available services on that day.
+  # When there are enough services, preserve the usual one-student-per-service rule.
+  if (any(available_per_day == 0)) {
+    bad_days <- days[which(available_per_day == 0)]
     stop(
-      "Infeasible: fewer available services than students on these days: ",
+      "Infeasible: no available services on these days after applying availability and academic-location exclusions: ",
       paste(bad_days, collapse = ", ")
     )
   }
+
+  service_capacity_by_day <- ifelse(
+    available_per_day < n_students,
+    ceiling(n_students / available_per_day),
+    1
+  )
 
   services_available_at_least_once <- service_ids[colSums(available) > 0]
 
@@ -249,17 +321,27 @@ schedule_rotation <- function(
     )
   }
 
-  service_available_days <- colSums(available)
+  # Maximum number of student-slots each service can support over the rotation.
+  # This accounts for days where multiple students are allowed on a service because
+  # the number of students exceeds the number of available services.
+  service_available_slots <- colSums(
+    available * matrix(
+      service_capacity_by_day,
+      nrow = n_days,
+      ncol = n_services,
+      byrow = FALSE
+    )
+  )
 
   if (require_all_available) {
     too_rare <- services_available_at_least_once[
-      service_available_days[services_available_at_least_once] <
+      service_available_slots[services_available_at_least_once] <
         n_students * min_exposures_per_student
     ]
 
     if (length(too_rare) > 0) {
       stop(
-        "Infeasible: these services are not available on enough days for every student to see them ",
+        "Infeasible: these services do not have enough available student-slots for every student to see them ",
         min_exposures_per_student,
         " time(s): ",
         paste(services[too_rare], collapse = ", ")
@@ -283,9 +365,11 @@ schedule_rotation <- function(
       d = day_ids
     ) %>%
 
-    # Each service gets at most one student per day
+    # Each service usually gets at most one student per day.
+    # If a day has fewer available services than students, allow multiple students
+    # on available services for that day, up to service_capacity_by_day[d].
     add_constraint(
-      sum_expr(x[s, d, v], s = student_ids) <= 1,
+      sum_expr(x[s, d, v], s = student_ids) <= service_capacity_by_day[d],
       d = day_ids,
       v = service_ids
     ) %>%
@@ -329,9 +413,7 @@ schedule_rotation <- function(
       back_to_back_penalty *
         sum_expr(y[s, d, v], s = student_ids, d = day_ids[-1], v = service_ids) +
         imbalance_penalty *
-        sum_expr(excess[s, v], s = student_ids, v = service_ids) +
-        academic_location_penalty *
-        sum_expr(academic_location[d, v] * x[s, d, v], s = student_ids, d = day_ids, v = service_ids),
+        sum_expr(excess[s, v], s = student_ids, v = service_ids),
       sense = "min"
     )
 
@@ -379,22 +461,21 @@ schedule_rotation <- function(
   )
 }
 
-# -----------------------------
-# Example locations.csv format
-# -----------------------------
-# locations <- read.csv("locations.csv", stringsAsFactors = FALSE)
+# ----------------- EXAMPLE CODE -----------------
+# Example usage:
 #
-# locations.csv should look like:
-# service,Monday,Tuesday,Wednesday,Thursday,Friday
-# GU,Main Campus,Main Campus,academic,East Campus,Main Campus
-# Breast,Main Campus,West Campus,West Campus,Main Campus,Main Campus
-# GI,East Campus,East Campus,Main Campus,Main Campus,East Campus
-
-# -----------------------------
-# Example use
-# -----------------------------
 # students <- c("Student A", "Student B", "Student C")
-# services <- c("GU", "Breast", "GI", "H&N", "CNS/Peds", "Gyn/Peds/Lymph", "Thoracic/Sarc/Lymph")
+#
+# services <- c(
+#   "GU",
+#   "Breast",
+#   "GI",
+#   "H&N",
+#   "CNS/Peds",
+#   "Gyn/Peds/Lymph",
+#   "Thoracic/Sarc/Lymph"
+# )
+#
 # days <- paste0("Day ", 1:10)
 # start_date <- as.Date("2026-07-06")
 #
@@ -404,17 +485,16 @@ schedule_rotation <- function(
 #   stringsAsFactors = FALSE
 # ) %>%
 #   mutate(
-#     day_num = as.integer(gsub("Day ", "", day)),
-#     week = ceiling(day_num / 5),
+#     week = ifelse(day %in% paste0("Day ", 1:5), 1, 2),
 #     available = case_when(
-#       week == 1 & service %in% c("GU", "Breast", "GI", "H&N", "CNS/Peds") ~ TRUE,
-#       week == 2 & service %in% c("GU", "GI", "H&N", "Gyn/Peds/Lymph", "Thoracic/Sarc/Lymph") ~ TRUE,
+#       week == 1 & service %in% c("Breast", "GI", "H&N", "CNS/Peds", "Gyn/Peds/Lymph") ~ TRUE,
+#       week == 2 & service %in% c("GU", "Breast", "GI", "H&N", "Thoracic/Sarc/Lymph") ~ TRUE,
 #       TRUE ~ FALSE
 #     )
 #   ) %>%
 #   select(day, service, available)
 #
-# locations <- read.csv("locations.csv", stringsAsFactors = FALSE)
+# locations <- read.csv("locations.csv", stringsAsFactors = FALSE, check.names = FALSE)
 #
 # sched <- schedule_rotation(
 #   students = students,
@@ -424,8 +504,10 @@ schedule_rotation <- function(
 #   start_date = start_date,
 #   locations = locations,
 #   days_per_week = 5,
-#   academic_location_penalty = 10000
+#   require_all_available = TRUE,
+#   min_exposures_per_student = 1
 # )
 #
 # sched$wide
 # sched$long
+# sched$long %>% filter(is_academic_location)

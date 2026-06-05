@@ -7,13 +7,14 @@ This R script creates daily student rotation schedules across multiple clinical 
 The scheduler is designed for 2–4 students rotating over a 2-week or 4-week block. Students switch services daily, and the schedule ensures that:
 
 - each student is assigned to exactly one service per day
-- no two students are assigned to the same service on the same day
+- no two students are assigned to the same service on the same day when there are enough available services
+- if there are fewer available services than students on a given day, multiple students may be assigned to the same available service
 - unavailable services are not assigned
+- service-days marked as `Academic` in `locations.csv` are treated as unavailable
 - each student sees each available service at least once, when feasible
 - back-to-back repeats of the same service are avoided when possible
 - schedules can be displayed using real calendar dates instead of only `Day 1`, `Day 2`, etc.
 - service locations can be appended to the schedule using a `locations.csv` file
-- service-days marked as `academic` are avoided unless needed to make the schedule feasible
 
 ## Requirements
 
@@ -168,23 +169,32 @@ GU - East Campus
 
 ## Academic Locations
 
-If a service location is listed as `Academic`, that service-day is treated as undesirable but not impossible.
+If a service location is listed as `Academic`, that service-day is treated as unavailable.
 
-The scheduler will avoid assigning a student to that service on that day unless the schedule cannot work otherwise. This behavior is controlled by the `academic_location_penalty` argument:
+For example:
 
-```r
-sched <- schedule_rotation(
-  students = students,
-  services = services,
-  days = days,
-  availability = availability,
-  start_date = start_date,
-  locations = locations,
-  academic_location_penalty = 10000
-)
+```csv
+service,Monday,Tuesday,Wednesday,Thursday,Friday
+CNS/Peds,Academic,Main Campus,Main Campus,Main Campus,Academic
 ```
 
-Higher values make the scheduler avoid academic service-days more strongly.
+This means `CNS/Peds` will not be scheduled on Mondays or Fridays. There is no fallback behavior for `Academic` days; they are fully excluded.
+
+## Multiple Students on One Service
+
+The scheduler normally prevents more than one student from being assigned to the same service on the same day.
+
+However, if a day has fewer available services than students, that strict rule would make the schedule impossible. In that case, the scheduler allows multiple students to share an available service on that day.
+
+For example, if there are 4 students but only 3 available services on a given day, the scheduler allows up to:
+
+```r
+ceiling(4 / 3)
+```
+
+students per available service that day.
+
+This fallback only applies on days where the number of available services is less than the number of students.
 
 ## Output
 
@@ -219,7 +229,7 @@ sched$long %>%
   arrange(student, service)
 ```
 
-Check for accidental same-day service overlap:
+Check for same-day service sharing:
 
 ```r
 sched$long %>%
@@ -227,7 +237,7 @@ sched$long %>%
   filter(n > 1)
 ```
 
-This should return zero rows.
+This should usually return zero rows. If rows are returned, it means multiple students were assigned to the same service on the same day, likely because there were fewer available services than students.
 
 Check for back-to-back repeats:
 
@@ -246,15 +256,15 @@ sched$long %>%
   filter(is_academic_location)
 ```
 
-Ideally this returns zero rows. If rows are returned, the scheduler used an academic service-day because it helped satisfy the other constraints.
+This should return zero rows because `Academic` service-days are forbidden.
 
 ## Notes
 
-The schedule may be infeasible if there are not enough available services on a given day or if a service is not available enough times for every student to rotate through it.
+The schedule may be infeasible if there are not enough available services or if a required service is not available enough times for every student to rotate through it.
 
-For example, if there are 3 students and every student must see `GU` at least once, then `GU` must be available on at least 3 separate days because only one student can be assigned to it per day.
+Because the scheduler now permits multiple students to share a service when necessary, a day with fewer services than students is no longer automatically infeasible.
 
-Similarly, if there are 3 students, then at least 3 services must be available on every rotation day.
+However, the schedule can still be infeasible if required services are too rare after excluding unavailable and `Academic` service-days.
 
 If no feasible schedule exists, try one of the following:
 
