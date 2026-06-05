@@ -245,6 +245,11 @@ schedule_rotation <- function(
     days_per_week = 5,
     require_all_available = TRUE,
     min_exposures_per_student = 1,
+    service_emphasis = NULL,
+    emphasis_per_week = 2,
+    allow_emphasis_back_to_back = TRUE,
+    emphasis_shortfall_penalty = 10000,
+    coverage_shortfall_penalty = 50,
     back_to_back_penalty = 100,
     imbalance_penalty = 1
 ) {
@@ -255,6 +260,48 @@ schedule_rotation <- function(
   student_ids <- seq_along(students)
   service_ids <- seq_along(services)
   day_ids <- seq_along(days)
+
+  # Normalize optional student-specific service emphasis.
+  # service_emphasis should be a data frame with columns:
+  #   student, service
+  # Optional column:
+  #   target_per_week
+  # If target_per_week is absent, emphasis_per_week is used.
+  #
+  # Emphasis targets are finalized after the availability matrix is built,
+  # because targets should only apply in weeks where the emphasized service is
+  # actually available after academic-location exclusions.
+  if (!is.null(service_emphasis) && nrow(as.data.frame(service_emphasis)) > 0) {
+    service_emphasis <- as.data.frame(service_emphasis, stringsAsFactors = FALSE)
+
+    if (!all(c("student", "service") %in% names(service_emphasis))) {
+      stop("service_emphasis must have columns named 'student' and 'service'.")
+    }
+
+    if (!"target_per_week" %in% names(service_emphasis)) {
+      service_emphasis$target_per_week <- emphasis_per_week
+    }
+
+    service_emphasis <- service_emphasis %>%
+      mutate(
+        student = trimws(as.character(student)),
+        service = trimws(as.character(service)),
+        target_per_week = as.numeric(target_per_week)
+      ) %>%
+      filter(
+        student %in% students,
+        service %in% services,
+        !is.na(target_per_week),
+        target_per_week > 0
+      )
+  } else {
+    service_emphasis <- data.frame(
+      student = character(0),
+      service = character(0),
+      target_per_week = numeric(0),
+      stringsAsFactors = FALSE
+    )
+  }
 
   avail_mat <- availability %>%
     mutate(
@@ -287,6 +334,67 @@ schedule_rotation <- function(
   # These assignments are forbidden, not merely penalized.
   available[academic_location == 1] <- 0
 
+  # Build emphasis targets after applying availability and academic exclusions.
+  # Targets are weekly: if a student emphasizes GI with target_per_week = 2,
+  # the optimizer strongly tries to schedule GI twice in each week where GI is
+  # available. If the emphasized service is unavailable for a week, that week
+  # contributes no emphasis target.
+  n_rotation_weeks <- ceiling(n_days / days_per_week)
+  week_ids <- ceiling(day_ids / days_per_week)
+
+  emphasis_target <- matrix(0, nrow = n_students, ncol = n_services)
+  emphasis_week_target <- array(0, dim = c(n_students, n_rotation_weeks, n_services))
+
+  if (nrow(service_emphasis) > 0) {
+    for (i in seq_len(nrow(service_emphasis))) {
+      s_id <- match(service_emphasis$student[i], students)
+      v_id <- match(service_emphasis$service[i], services)
+      target_per_week_i <- service_emphasis$target_per_week[i]
+
+      for (w in seq_len(n_rotation_weeks)) {
+        week_day_ids <- day_ids[week_ids == w]
+        available_days_this_week <- sum(available[week_day_ids, v_id] > 0)
+
+        # A single student can only be on one service per day, so the weekly
+        # target cannot exceed the number of days that service is available.
+        weekly_target <- ifelse(
+          available_days_this_week > 0,
+          min(target_per_week_i, available_days_this_week),
+          0
+        )
+
+        emphasis_week_target[s_id, w, v_id] <- weekly_target
+      }
+    }
+
+    emphasis_target <- apply(emphasis_week_target, c(1, 3), sum)
+  }
+
+  has_emphasis <- rowSums(emphasis_target) > 0
+  coverage_relaxed <- matrix(
+    as.integer(has_emphasis & require_all_available),
+    nrow = n_students,
+    ncol = n_services,
+    byrow = FALSE
+  )
+  emphasis_active <- matrix(
+    as.integer(emphasis_target > 0),
+    nrow = n_students,
+    ncol = n_services
+  )
+  emphasis_week_active <- array(
+    as.integer(emphasis_week_target > 0),
+    dim = c(n_students, n_rotation_weeks, n_services)
+  )
+
+  # Back-to-back repeats are usually penalized. If requested, remove that
+  # penalty for each student's emphasized service so consecutive emphasis
+  # days are allowed when helpful.
+  back_to_back_weight <- matrix(1, nrow = n_students, ncol = n_services)
+  if (isTRUE(allow_emphasis_back_to_back)) {
+    back_to_back_weight[emphasis_active == 1] <- 0
+  }
+
   available_per_day <- rowSums(available)
 
   # If there are fewer available services than students on a given day,
@@ -308,12 +416,18 @@ schedule_rotation <- function(
 
   services_available_at_least_once <- service_ids[colSums(available) > 0]
 
+  # If a student has an emphasis service, their all-service exposure requirement
+  # is softened so they can miss another service in order to emphasize the chosen one.
+  # Students without an emphasis still have the usual hard exposure requirement.
+  hard_exposure_students <- student_ids[!has_emphasis]
+
   if (
     require_all_available &&
+    length(hard_exposure_students) > 0 &&
     length(services_available_at_least_once) * min_exposures_per_student > n_days
   ) {
     stop(
-      "Infeasible: each student cannot see ",
+      "Infeasible: non-emphasis students cannot see ",
       length(services_available_at_least_once),
       " services ",
       min_exposures_per_student,
@@ -335,15 +449,15 @@ schedule_rotation <- function(
     )
   )
 
-  if (require_all_available) {
+  if (require_all_available && length(hard_exposure_students) > 0) {
     too_rare <- services_available_at_least_once[
       service_available_slots[services_available_at_least_once] <
-        n_students * min_exposures_per_student
+        length(hard_exposure_students) * min_exposures_per_student
     ]
 
     if (length(too_rare) > 0) {
       stop(
-        "Infeasible: these services do not have enough available student-slots for every student to see them ",
+        "Infeasible: these services do not have enough available student-slots for every non-emphasis student to see them ",
         min_exposures_per_student,
         " time(s): ",
         paste(services[too_rare], collapse = ", ")
@@ -359,6 +473,9 @@ schedule_rotation <- function(
     add_variable(x[s, d, v], s = student_ids, d = day_ids, v = service_ids, type = "binary") %>%
     add_variable(y[s, d, v], s = student_ids, d = day_ids[-1], v = service_ids, type = "binary") %>%
     add_variable(excess[s, v], s = student_ids, v = service_ids, type = "integer", lb = 0) %>%
+    add_variable(coverage_shortfall[s, v], s = student_ids, v = service_ids, type = "integer", lb = 0) %>%
+    add_variable(emphasis_shortfall[s, v], s = student_ids, v = service_ids, type = "integer", lb = 0) %>%
+    add_variable(emphasis_week_shortfall[s, w, v], s = student_ids, w = seq_len(n_rotation_weeks), v = service_ids, type = "integer", lb = 0) %>%
 
     # Each student gets exactly one service per day
     add_constraint(
@@ -397,15 +514,47 @@ schedule_rotation <- function(
       excess[s, v] >= sum_expr(x[s, d, v], d = day_ids) - target_per_service,
       s = student_ids,
       v = service_ids
+    ) %>%
+
+    # For emphasis students, missed all-service exposure requirements are allowed
+    # but penalized. For non-emphasis students, hard constraints are added below.
+    add_constraint(
+      coverage_shortfall[s, v] >= min_exposures_per_student - sum_expr(x[s, d, v], d = day_ids),
+      s = student_ids,
+      v = services_available_at_least_once
+    ) %>%
+
+    # Penalize missing the total emphasized-service target.
+    add_constraint(
+      emphasis_shortfall[s, v] >= emphasis_target[s, v] - sum_expr(x[s, d, v], d = day_ids),
+      s = student_ids,
+      v = service_ids
     )
 
-  # Require each student to see each available service at least once
-  if (require_all_available) {
+  # Penalize missing weekly emphasized-service targets. These constraints are
+  # added week-by-week so that emphasis is encouraged in each available week,
+  # rather than only as a total across the full rotation.
+  for (w_i in seq_len(n_rotation_weeks)) {
+    week_day_ids <- day_ids[week_ids == w_i]
+
+    model <- model %>%
+      add_constraint(
+        emphasis_week_shortfall[s, w_i, v] >=
+          emphasis_week_target[s, w_i, v] - sum_expr(x[s, d, v], d = week_day_ids),
+        s = student_ids,
+        v = service_ids
+      )
+  }
+
+  # Require non-emphasis students to see each available service at least once.
+  # Emphasis students can miss some other services if that is needed to satisfy
+  # their emphasis preference.
+  if (require_all_available && length(hard_exposure_students) > 0) {
     for (v in services_available_at_least_once) {
       model <- model %>%
         add_constraint(
           sum_expr(x[s, d, v], d = day_ids) >= min_exposures_per_student,
-          s = student_ids
+          s = hard_exposure_students
         )
     }
   }
@@ -413,9 +562,15 @@ schedule_rotation <- function(
   model <- model %>%
     set_objective(
       back_to_back_penalty *
-        sum_expr(y[s, d, v], s = student_ids, d = day_ids[-1], v = service_ids) +
+        sum_expr(back_to_back_weight[s, v] * y[s, d, v], s = student_ids, d = day_ids[-1], v = service_ids) +
         imbalance_penalty *
-        sum_expr(excess[s, v], s = student_ids, v = service_ids),
+        sum_expr(excess[s, v], s = student_ids, v = service_ids) +
+        coverage_shortfall_penalty *
+        sum_expr(coverage_relaxed[s, v] * coverage_shortfall[s, v], s = student_ids, v = service_ids) +
+        emphasis_shortfall_penalty *
+        sum_expr(emphasis_active[s, v] * emphasis_shortfall[s, v], s = student_ids, v = service_ids) +
+        emphasis_shortfall_penalty *
+        sum_expr(emphasis_week_active[s, w, v] * emphasis_week_shortfall[s, w, v], s = student_ids, w = seq_len(n_rotation_weeks), v = service_ids),
       sense = "min"
     )
 
@@ -446,6 +601,30 @@ schedule_rotation <- function(
     arrange(day_num, student) %>%
     select(week, date_label, date, weekday, day_num, day, student, service, location, is_academic_location, assignment)
 
+  emphasis_summary <- NULL
+  if (!is.null(service_emphasis) && nrow(as.data.frame(service_emphasis)) > 0) {
+    emphasis_summary <- expand.grid(
+      student_id = student_ids,
+      service_id = service_ids,
+      stringsAsFactors = FALSE
+    ) %>%
+      mutate(
+        student = students[student_id],
+        service = services[service_id],
+        target = emphasis_target[cbind(student_id, service_id)]
+      ) %>%
+      filter(target > 0) %>%
+      left_join(
+        long_schedule %>% count(student, service, name = "scheduled"),
+        by = c("student", "service")
+      ) %>%
+      mutate(
+        scheduled = ifelse(is.na(scheduled), 0L, scheduled),
+        shortfall = pmax(target - scheduled, 0)
+      ) %>%
+      select(student, service, target, scheduled, shortfall)
+  }
+
   wide_schedule <- long_schedule %>%
     mutate(date_label = factor(date_label, levels = unique(date_label), ordered = TRUE)) %>%
     select(week, date_label, student, assignment) %>%
@@ -459,7 +638,8 @@ schedule_rotation <- function(
 
   list(
     long = long_schedule,
-    wide = wide_schedule
+    wide = wide_schedule,
+    emphasis_summary = emphasis_summary
   )
 }
 
@@ -535,6 +715,23 @@ ui <- fluidPage(
       ),
       helpText("By default, the app uses locations.csv bundled in the same folder as app.R. Uploading a file here temporarily overrides that bundled file. Expected columns: service, Monday, Tuesday, Wednesday, Thursday, Friday. If a location value is 'academic', that service-day is treated as unavailable and will not be assigned."),
 
+      h4("Optional service emphasis"),
+      helpText("Optionally choose one emphasized service per student. Emphasized students may receive that service more often and may miss some other services."),
+      uiOutput("student_emphasis_ui"),
+      numericInput(
+        inputId = "emphasis_per_week",
+        label = "Target emphasized-service assignments per week",
+        value = 2,
+        min = 1,
+        max = 5,
+        step = 1
+      ),
+      checkboxInput(
+        inputId = "allow_emphasis_back_to_back",
+        label = "Allow back-to-back days for emphasized services",
+        value = TRUE
+      ),
+
       h4("Schedule rules"),
       checkboxInput(
         inputId = "require_all_available",
@@ -584,6 +781,9 @@ ui <- fluidPage(
       h3("Exposure counts"),
       DTOutput("counts_table"),
 
+      h3("Emphasis summary"),
+      DTOutput("emphasis_table"),
+
       h3("Back-to-back repeats"),
       DTOutput("repeat_table")
     )
@@ -625,6 +825,26 @@ server <- function(input, output, session) {
     )
   })
 
+  output$student_emphasis_ui <- renderUI({
+    students <- parse_list_input(input$students_text)
+    services <- selected_services()
+
+    if (length(students) == 0 || length(services) == 0) {
+      return(helpText("Enter students and select services to enable emphasis options."))
+    }
+
+    tagList(
+      lapply(seq_along(students), function(i) {
+        selectInput(
+          inputId = paste0("emphasis_service_", i),
+          label = paste(students[i], "emphasis service"),
+          choices = c("No emphasis" = "", services),
+          selected = ""
+        )
+      })
+    )
+  })
+
   result <- eventReactive(input$run_schedule, {
     students <- parse_list_input(input$students_text)
     services <- selected_services()
@@ -632,6 +852,24 @@ server <- function(input, output, session) {
     days_per_week <- as.integer(input$days_per_week)
     days <- make_days(n_weeks, days_per_week)
     locations <- read_locations_file(input$locations_file)
+
+    emphasis <- tibble(
+      student = character(0),
+      service = character(0),
+      target_per_week = numeric(0)
+    )
+
+    if (length(students) > 0) {
+      emphasis <- tibble(
+        student = students,
+        service = vapply(seq_along(students), function(i) {
+          value <- input[[paste0("emphasis_service_", i)]]
+          if (is.null(value)) "" else value
+        }, character(1)),
+        target_per_week = input$emphasis_per_week
+      ) %>%
+        filter(!is.na(service), service != "")
+    }
 
     validate(
       need(length(students) >= 1, "Enter at least one student."),
@@ -660,6 +898,9 @@ server <- function(input, output, session) {
           days_per_week = days_per_week,
           require_all_available = isTRUE(input$require_all_available),
           min_exposures_per_student = input$min_exposures,
+          service_emphasis = emphasis,
+          emphasis_per_week = input$emphasis_per_week,
+          allow_emphasis_back_to_back = isTRUE(input$allow_emphasis_back_to_back),
           back_to_back_penalty = input$back_to_back_penalty,
           imbalance_penalty = input$imbalance_penalty
         )
@@ -676,11 +917,20 @@ server <- function(input, output, session) {
           filter(service == previous_service) %>%
           select(date_label, student, service, location)
 
+        message <- "Schedule created successfully. Academic-location service-days were treated as unavailable."
+        if (nrow(emphasis) > 0) {
+          message <- paste0(
+            message,
+            " Service emphasis was used as a soft preference; emphasized students may miss some other services. Back-to-back days for emphasized services are allowed if selected."
+          )
+        }
+
         list(
           ok = TRUE,
-          message = "Schedule created successfully. Academic-location service-days were treated as unavailable.",
+          message = message,
           sched = sched,
           counts = counts,
+          emphasis = sched$emphasis_summary,
           repeats = repeats
         )
       },
@@ -690,6 +940,7 @@ server <- function(input, output, session) {
           message = conditionMessage(e),
           sched = NULL,
           counts = NULL,
+          emphasis = NULL,
           repeats = NULL
         )
       }
@@ -720,6 +971,29 @@ server <- function(input, output, session) {
 
     datatable(
       res$counts,
+      rownames = FALSE,
+      options = list(pageLength = 25)
+    )
+  })
+
+  output$emphasis_table <- renderDT({
+    res <- result()
+    req(res$ok)
+
+    emphasis <- res$emphasis
+
+    if (is.null(emphasis) || nrow(emphasis) == 0) {
+      emphasis <- tibble(
+        student = character(0),
+        service = character(0),
+        target = numeric(0),
+        scheduled = integer(0),
+        shortfall = numeric(0)
+      )
+    }
+
+    datatable(
+      emphasis,
       rownames = FALSE,
       options = list(pageLength = 25)
     )

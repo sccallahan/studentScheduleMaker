@@ -12,7 +12,9 @@ The scheduler is designed for 2–4 students rotating over a 2-week or 4-week bl
 - unavailable services are not assigned
 - service-days marked as `Academic` in `locations.csv` are treated as unavailable
 - each student sees each available service at least once, when feasible
+- optional per-student service emphasis can prioritize one service for a student
 - back-to-back repeats of the same service are avoided when possible
+- back-to-back days are allowed for a student's emphasized service, when enabled
 - schedules can be displayed using real calendar dates instead of only `Day 1`, `Day 2`, etc.
 - service locations can be appended to the schedule using a `locations.csv` file
 
@@ -196,12 +198,69 @@ students per available service that day.
 
 This fallback only applies on days where the number of available services is less than the number of students.
 
+## Optional Service Emphasis
+
+You can optionally assign one emphasized service to each student.
+
+This is useful when a student wants extra exposure to a particular disease site or clinic. For example:
+
+- Student A emphasizes `GI`
+- Student B emphasizes `H&N`
+- Student C has no emphasis
+
+The scheduler will strongly prioritize assigning the emphasized service to that student.
+
+Example:
+
+```r
+service_emphasis <- tibble::tibble(
+  student = c("Student A", "Student B"),
+  service = c("GI", "H&N"),
+  target_per_week = c(2, 2)
+)
+
+sched <- schedule_rotation(
+  students = students,
+  services = services,
+  days = days,
+  availability = availability,
+  start_date = start_date,
+  locations = locations,
+  service_emphasis = service_emphasis,
+  emphasis_per_week = 2,
+  allow_emphasis_back_to_back = TRUE
+)
+```
+
+The emphasis target is applied weekly. If Student A has a `GI` emphasis with a target of 2, the optimizer tries to schedule Student A on `GI` twice in each week where `GI` is available.
+
+If the emphasized service is unavailable for a week, that week does not count against the target.
+
+Emphasis is weighted strongly. Missing an emphasis target is penalized much more heavily than ordinary back-to-back repeats or mild service imbalance. This means a student may miss some other available services in order to receive more assignments on their emphasized service.
+
+Back-to-back days are allowed for a student's emphasized service when:
+
+```r
+allow_emphasis_back_to_back = TRUE
+```
+
+Back-to-back repeats for non-emphasized services are still discouraged.
+
+The output includes an emphasis summary:
+
+```r
+sched$emphasis_summary
+```
+
+This shows the target and achieved number of emphasized-service assignments.
+
 ## Output
 
-The function returns a list with two tables:
+The function returns a list with several tables:
 
 - `sched$wide`: a readable schedule with one row per date and one column per student
 - `sched$long`: a tidy table with one row per student-day assignment
+- `sched$emphasis_summary`: emphasis targets and achieved counts, when emphasis is used
 
 The wide output is easiest to read or share. The long output is more useful for checking counts, filtering, and analysis.
 
@@ -227,6 +286,12 @@ Count how many times each student sees each service:
 sched$long %>%
   count(student, service) %>%
   arrange(student, service)
+```
+
+Check emphasis results:
+
+```r
+sched$emphasis_summary
 ```
 
 Check for same-day service sharing:
@@ -262,9 +327,11 @@ This should return zero rows because `Academic` service-days are forbidden.
 
 The schedule may be infeasible if there are not enough available services or if a required service is not available enough times for every student to rotate through it.
 
-Because the scheduler now permits multiple students to share a service when necessary, a day with fewer services than students is no longer automatically infeasible.
+Because the scheduler permits multiple students to share a service when necessary, a day with fewer services than students is no longer automatically infeasible.
 
 However, the schedule can still be infeasible if required services are too rare after excluding unavailable and `Academic` service-days.
+
+When service emphasis is used, the scheduler prioritizes the emphasized service strongly. This may mean that the emphasized student does not see every other available service.
 
 If no feasible schedule exists, try one of the following:
 
@@ -273,3 +340,4 @@ If no feasible schedule exists, try one of the following:
 - allow fewer services to be required
 - extend the rotation length
 - reduce the number of students assigned to the block
+- lower the emphasis target

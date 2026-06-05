@@ -18,7 +18,9 @@ The scheduler creates a rotation schedule that aims to:
 - use only services that are marked as available
 - treat service-days marked as `Academic` as unavailable
 - ensure each student sees each available service at least once, when feasible
+- optionally prioritize an emphasized service for each student
 - avoid assigning the same student to the same service on back-to-back days when possible
+- allow back-to-back days for a student's emphasized service, when enabled
 - display the schedule using real dates, such as `Monday, January 1`
 - append campus/location information to each service assignment
 
@@ -120,7 +122,27 @@ For each week, select which services are available during that week.
 
 The scheduler will only assign students to services that are checked as available for that week and not marked as `Academic` for that weekday.
 
-### 7. Review Schedule Rules
+### 7. Optional Service Emphasis
+
+For each student, you can optionally choose one service to emphasize.
+
+For example:
+
+- Student A: `GI`
+- Student B: `H&N`
+- Student C: no emphasis
+
+The app will strongly try to schedule each student on their emphasized service a target number of times per week.
+
+The default target is usually 2 emphasized-service assignments per week. If the emphasized service is not available in a given week, that week does not count against the target.
+
+Service emphasis is intentionally weighted strongly. Missing an emphasis target is considered more important than ordinary back-to-back repeats or mild service imbalance.
+
+When service emphasis is used, a student may miss some other available services in order to receive more time on the emphasized service.
+
+The app also includes an option to allow back-to-back days for emphasized services. This should usually be left enabled, because emphasized services may otherwise be difficult to schedule 2-3 times per week.
+
+### 8. Review Schedule Rules
 
 The default settings require each student to see each available service at least once, when feasible.
 
@@ -128,10 +150,11 @@ The app also includes penalty settings for:
 
 - back-to-back repeats
 - service imbalance
+- emphasis shortfall
 
 Most users should leave these settings at their defaults.
 
-### 8. Create the Schedule
+### 9. Create the Schedule
 
 Click **Create schedule**.
 
@@ -160,9 +183,26 @@ However, if a day has fewer available services than students, the app allows mul
 
 This fallback only applies when the number of available services on a day is less than the number of students.
 
+## Service Emphasis Details
+
+Service emphasis is optional and is set separately for each student.
+
+The emphasis target is weekly. If a student emphasizes `GI` with a target of 2, the optimizer tries to schedule that student on `GI` twice in each week where `GI` is available.
+
+If `GI` is unavailable in week 2, the week 2 target becomes 0. The app will still strongly pursue the week 1 target if `GI` is available in week 1.
+
+Emphasis is a soft preference rather than an absolute guarantee. It is weighted strongly, but the schedule must still obey hard constraints such as:
+
+- one assignment per student per day
+- no scheduling on unavailable services
+- no scheduling on `Academic` service-days
+- daily service capacity rules
+
+Back-to-back emphasized-service days can be allowed. When enabled, the usual back-to-back repeat penalty does not apply to a student's emphasized service.
+
 ## Outputs
 
-The app provides three main outputs:
+The app provides four main outputs:
 
 ### Schedule
 
@@ -181,11 +221,15 @@ Breast - East Campus
 
 This table shows how many times each student is assigned to each service.
 
+### Emphasis Summary
+
+This table shows each student's emphasized service, the weekly target, and the achieved number of emphasized-service assignments.
+
 ### Back-to-Back Repeats
 
 This table shows any cases where a student is assigned to the same service on consecutive days.
 
-Ideally, this table should be empty. However, back-to-back repeats may occur if they are necessary to satisfy the other scheduling rules.
+Ideally, this table should be empty for non-emphasized services. Back-to-back repeats may appear for emphasized services if that option is enabled.
 
 ## Downloads
 
@@ -220,7 +264,7 @@ week,date_label,date,weekday,day_num,day,student,service,location,is_academic_lo
 1,"Monday, January 1",2026-01-01,Monday,1,Day 1,Student A,GU,Main Campus,FALSE,GU - Main Campus
 ```
 
-This format is useful for data analysis, checking counts, identifying shared service-days, or reshaping the schedule later.
+This format is useful for data analysis, checking counts, identifying shared service-days, reviewing emphasis performance, or reshaping the schedule later.
 
 ## Hosting Notes
 
@@ -242,9 +286,11 @@ The optional upload field remains available as an override for testing or one-of
 
 Some combinations of students, services, and availability are mathematically impossible.
 
-The app now permits multiple students to share a service when there are fewer available services than students on a given day. Therefore, a day with fewer services than students is no longer automatically infeasible.
+The app permits multiple students to share a service when there are fewer available services than students on a given day. Therefore, a day with fewer services than students is no longer automatically infeasible.
 
 However, the schedule can still be infeasible if a required service is not available enough times after excluding unavailable and `Academic` service-days.
+
+When service emphasis is used, the app prioritizes the emphasized service strongly. This may mean the emphasized student does not see every other available service.
 
 When no feasible schedule exists, try one of the following:
 
@@ -253,3 +299,4 @@ When no feasible schedule exists, try one of the following:
 - allow fewer services to be required
 - extend the rotation length
 - reduce the number of students assigned to the block
+- lower the emphasis target
