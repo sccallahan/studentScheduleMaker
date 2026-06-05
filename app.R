@@ -16,6 +16,7 @@ library(ROI.plugin.glpk)
 library(dplyr)
 library(tidyr)
 library(DT)
+library(ggplot2)
 
 # -----------------------------
 # Helper functions
@@ -229,6 +230,60 @@ read_locations_file <- function(file_info, default_path = "locations.csv") {
   }
 
   NULL
+}
+
+
+default_service_colors <- c(
+  "GU" = "#b6d7a8",
+  "Breast" = "#f9cb9c",
+  "GI" = "#b4a7d6",
+  "H&N" = "#a4c2f4",
+  "CNS/Peds" = "#d9d9d9",
+  "Gyn/Peds/Lymph" = "#d5a6bd",
+  "Thoracic/Sarc/Lymph" = "#ffe599"
+)
+
+get_service_colors <- function(services) {
+  service_colors <- default_service_colors
+  extra_services <- setdiff(services, names(service_colors))
+
+  if (length(extra_services) > 0) {
+    extra_colors <- grDevices::hcl.colors(length(extra_services), palette = "Set 2")
+    names(extra_colors) <- extra_services
+    service_colors <- c(service_colors, extra_colors)
+  }
+
+  service_colors[services]
+}
+
+make_schedule_plot <- function(long_schedule, service_colors = NULL) {
+  if (is.null(service_colors)) {
+    service_colors <- get_service_colors(unique(long_schedule$service))
+  }
+
+  plot_data <- long_schedule %>%
+    mutate(
+      student = factor(student, levels = unique(student)),
+      date_plot = factor(date_label, levels = rev(unique(date_label)), ordered = TRUE),
+      tile_label = ifelse(
+        is.na(location) | location == "",
+        service,
+        paste0(service, "\n", location)
+      )
+    )
+
+  ggplot(plot_data, aes(x = student, y = date_plot, fill = service)) +
+    geom_tile(color = "white", linewidth = 0.8) +
+    geom_text(aes(label = tile_label), size = 3.1, lineheight = 0.95) +
+    scale_fill_manual(values = service_colors, drop = FALSE) +
+    labs(x = "Student", y = NULL, fill = "Service") +
+    theme_minimal(base_size = 12) +
+    theme(
+      panel.grid = element_blank(),
+      axis.text.x = element_text(face = "bold"),
+      axis.text.y = element_text(size = 10),
+      legend.position = "bottom"
+    )
 }
 
 # -----------------------------
@@ -636,10 +691,18 @@ schedule_rotation <- function(
     mutate(date_label = as.character(date_label)) %>%
     rename(date = date_label)
 
+  service_colors <- get_service_colors(services)
+  schedule_plot <- make_schedule_plot(
+    long_schedule = long_schedule,
+    service_colors = service_colors
+  )
+
   list(
     long = long_schedule,
     wide = wide_schedule,
-    emphasis_summary = emphasis_summary
+    emphasis_summary = emphasis_summary,
+    plot = schedule_plot,
+    service_colors = service_colors
   )
 }
 
@@ -764,6 +827,7 @@ ui <- fluidPage(
       br(), br(),
       downloadButton("download_wide", "Download wide CSV"),
       downloadButton("download_long", "Download long CSV"),
+      downloadButton("download_plot", "Download schedule plot PNG"),
       downloadButton("download_locations_template", "Download locations template")
     ),
 
@@ -777,6 +841,9 @@ ui <- fluidPage(
       h3("Schedule"),
       verbatimTextOutput("status_text"),
       DTOutput("schedule_table"),
+
+      h3("Schedule plot"),
+      plotOutput("schedule_plot", height = "900px"),
 
       h3("Exposure counts"),
       DTOutput("counts_table"),
@@ -965,6 +1032,13 @@ server <- function(input, output, session) {
     )
   })
 
+
+  output$schedule_plot <- renderPlot({
+    res <- result()
+    req(res$ok)
+    print(res$sched$plot)
+  }, res = 120)
+
   output$counts_table <- renderDT({
     res <- result()
     req(res$ok)
@@ -1040,6 +1114,26 @@ server <- function(input, output, session) {
       res <- result()
       req(res$ok)
       write.csv(res$sched$long, file, row.names = FALSE)
+    }
+  )
+
+  output$download_plot <- downloadHandler(
+    filename = function() {
+      "rotation_schedule_plot.png"
+    },
+    content = function(file) {
+      res <- result()
+      req(res$ok)
+      n_students <- dplyr::n_distinct(res$sched$long$student)
+      n_dates <- dplyr::n_distinct(res$sched$long$date_label)
+      ggplot2::ggsave(
+        filename = file,
+        plot = res$sched$plot,
+        width = max(8, n_students * 2.2),
+        height = max(6, n_dates * 0.55),
+        dpi = 300,
+        bg = "white"
+      )
     }
   )
 
