@@ -286,6 +286,126 @@ make_schedule_plot <- function(long_schedule, service_colors = NULL) {
     )
 }
 
+
+read_manual_wide_schedule_file <- function(file_info) {
+  if (is.null(file_info)) {
+    return(NULL)
+  }
+
+  read.csv(file_info$datapath, stringsAsFactors = FALSE, check.names = FALSE)
+}
+
+wide_schedule_to_long_for_plot <- function(wide_schedule, days_per_week = 5) {
+  # Converts an edited "wide" schedule CSV back into long format for plotting.
+  #
+  # Expected wide format:
+  #   week,date,Student A,Student B,Student C
+  #   1,"Monday, January 1","GI - Main Campus","GU - East Campus","Breast"
+  #
+  # Student cells can contain either:
+  #   Service
+  # or:
+  #   Service - Location
+
+  wide_schedule <- as.data.frame(
+    wide_schedule,
+    stringsAsFactors = FALSE,
+    check.names = FALSE
+  )
+
+  if (nrow(wide_schedule) == 0 || ncol(wide_schedule) < 2) {
+    stop("The uploaded wide schedule must have at least one date column and one student column.")
+  }
+
+  nms <- names(wide_schedule)
+
+  date_col <- if ("date" %in% nms) {
+    "date"
+  } else if ("date_label" %in% nms) {
+    "date_label"
+  } else {
+    nms[1]
+  }
+
+  week_col <- if ("week" %in% nms) "week" else NA_character_
+
+  exclude_cols <- unique(c(
+    date_col,
+    "week",
+    "date",
+    "date_label",
+    "weekday",
+    "day",
+    "day_num"
+  ))
+
+  student_cols <- setdiff(nms, exclude_cols)
+
+  if (length(student_cols) == 0) {
+    stop("Could not identify student columns in the uploaded wide schedule.")
+  }
+
+  if (!is.na(week_col)) {
+    row_lookup <- wide_schedule %>%
+      mutate(
+        .row_id = row_number(),
+        date_label = as.character(.data[[date_col]]),
+        week = .data[[week_col]]
+      ) %>%
+      select(.row_id, week, date_label)
+  } else {
+    row_lookup <- wide_schedule %>%
+      mutate(
+        .row_id = row_number(),
+        date_label = as.character(.data[[date_col]]),
+        week = ceiling(row_number() / days_per_week)
+      ) %>%
+      select(.row_id, week, date_label)
+  }
+
+  wide_schedule %>%
+    mutate(.row_id = row_number()) %>%
+    select(.row_id, all_of(student_cols)) %>%
+    pivot_longer(
+      cols = all_of(student_cols),
+      names_to = "student",
+      values_to = "assignment"
+    ) %>%
+    left_join(row_lookup, by = ".row_id") %>%
+    mutate(
+      assignment = trimws(as.character(assignment)),
+      assignment = ifelse(is.na(assignment) | assignment == "", NA_character_, assignment)
+    ) %>%
+    filter(!is.na(assignment)) %>%
+    mutate(
+      service = trimws(sub("\\s+-\\s+.*$", "", assignment)),
+      location = ifelse(
+        grepl("\\s+-\\s+", assignment),
+        trimws(sub("^.*?\\s+-\\s+", "", assignment)),
+        NA_character_
+      ),
+      date = as.Date(NA),
+      weekday = ifelse(grepl(",", date_label), sub(",.*$", "", date_label), NA_character_),
+      day_num = .row_id,
+      day = paste0("Manual Day ", .row_id),
+      is_academic_location = is_academic_location(location)
+    ) %>%
+    select(
+      week,
+      date_label,
+      date,
+      weekday,
+      day_num,
+      day,
+      student,
+      service,
+      location,
+      is_academic_location,
+      assignment
+    ) %>%
+    arrange(day_num, student)
+}
+
 # -----------------------------
 # Scheduler function
 # -----------------------------
@@ -852,7 +972,21 @@ ui <- fluidPage(
       DTOutput("emphasis_table"),
 
       h3("Back-to-back repeats"),
-      DTOutput("repeat_table")
+      DTOutput("repeat_table"),
+
+      hr(),
+
+      h3("Plot from edited wide schedule"),
+      p("Upload a wide schedule CSV after making manual edits. The app will regenerate the same color-coded plot without rerunning the scheduler."),
+      fileInput(
+        inputId = "manual_wide_file",
+        label = "Upload edited wide schedule CSV",
+        accept = c(".csv")
+      ),
+      helpText("Expected format: one date column, optional week column, and one column per student. Student cells should contain either 'Service' or 'Service - Location'."),
+      verbatimTextOutput("manual_plot_status"),
+      plotOutput("manual_schedule_plot", height = "900px"),
+      downloadButton("download_manual_plot", "Download edited schedule plot PNG")
     )
   )
 )
@@ -1016,6 +1150,50 @@ server <- function(input, output, session) {
     out
   })
 
+
+  manual_plot_result <- reactive({
+    req(input$manual_wide_file)
+
+    out <- tryCatch(
+      {
+        wide_schedule <- read_manual_wide_schedule_file(input$manual_wide_file)
+
+        long_schedule <- wide_schedule_to_long_for_plot(
+          wide_schedule = wide_schedule,
+          days_per_week = as.integer(input$days_per_week)
+        )
+
+        schedule_plot <- make_schedule_plot(
+          long_schedule = long_schedule,
+          service_colors = get_service_colors(unique(long_schedule$service))
+        )
+
+        list(
+          ok = TRUE,
+          message = paste0(
+            "Plot generated from uploaded wide schedule. Rows: ",
+            dplyr::n_distinct(long_schedule$date_label),
+            "; students: ",
+            dplyr::n_distinct(long_schedule$student),
+            "."
+          ),
+          long = long_schedule,
+          plot = schedule_plot
+        )
+      },
+      error = function(e) {
+        list(
+          ok = FALSE,
+          message = conditionMessage(e),
+          long = NULL,
+          plot = NULL
+        )
+      }
+    )
+
+    out
+  })
+
   output$status_text <- renderText({
     res <- result()
     res$message
@@ -1129,6 +1307,42 @@ server <- function(input, output, session) {
       ggplot2::ggsave(
         filename = file,
         plot = res$sched$plot,
+        width = max(8, n_students * 2.2),
+        height = max(6, n_dates * 0.55),
+        dpi = 300,
+        bg = "white"
+      )
+    }
+  )
+
+
+  output$manual_plot_status <- renderText({
+    if (is.null(input$manual_wide_file)) {
+      return("Upload an edited wide schedule CSV to generate a plot.")
+    }
+
+    res <- manual_plot_result()
+    res$message
+  })
+
+  output$manual_schedule_plot <- renderPlot({
+    res <- manual_plot_result()
+    req(res$ok)
+    print(res$plot)
+  }, res = 120)
+
+  output$download_manual_plot <- downloadHandler(
+    filename = function() {
+      "edited_rotation_schedule_plot.png"
+    },
+    content = function(file) {
+      res <- manual_plot_result()
+      req(res$ok)
+      n_students <- dplyr::n_distinct(res$long$student)
+      n_dates <- dplyr::n_distinct(res$long$date_label)
+      ggplot2::ggsave(
+        filename = file,
+        plot = res$plot,
         width = max(8, n_students * 2.2),
         height = max(6, n_dates * 0.55),
         dpi = 300,
